@@ -47,7 +47,7 @@ echo "change IP.1 to your etcd server IP (check using hostname -I) in etcd-serve
 #generate etcd-server.csr
 openssl req -new -key etcd-server.key -subj "/CN=etcd" -out etcd-server.csr -config etcd-server.cnf
 #sign etcd-server.csr
-openssl x509 -req -in etcd-server.csr -CA ca.crt -CAkey ca.key -CAcreateserial  -out etcd-server.crt -extensions v3_req -extfile etcd.cnf -days 20000
+openssl x509 -req -in etcd-server.csr -CA ca.crt -CAkey ca.key -CAcreateserial  -out etcd-server.crt -extensions v3_req -extfile etcd-server.cnf -days 20000
 #verify etcd-server.crt
 openssl x509 -in etcd-server.crt -text -noout
 ```
@@ -88,6 +88,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+
 systemctl daemon-reload
 systemctl enable etcd
 systemctl start etcd
@@ -108,4 +109,86 @@ etcdctl --endpoints=https://127.0.0.1:2379 \
 --cert=/root/certificates/etcd-client.crt \
 --key=/root/certificates/etcd-client.key \
 get key1
+```
+
+# API-SERVER
+
+### install apiserver:
+```sh
+cd /root/binaries/
+wget https://dl.k8s.io/v1.32.3/kubernetes-server-linux-arm64.tar.gz
+tar xzvf kubernetes-server-linux-arm64.tar.gz
+cp apiextensions-apiserver kube-aggregator kube-apiserver kube-controller-manager kube-log-runner kube-proxy kube-scheduler kubeadm kubectl kubectl-convert kubelet mounter /usr/local/bin/
+```
+### generate client cert for api-server (etcd authentication):
+```sh
+cd /root/certificates
+openssl genrsa -out api-etcd.key 2048
+openssl req -new -key api-etcd.key -subj "/CN=kube-apiserver" -out api-etcd.csr
+openssl x509 -req -in api-etcd.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out api-etcd.crt -days 2000
+```
+
+### generate certs for api-server:
+```sh
+cat <<EOF | sudo tee api.conf
+[req]
+req_extensions = v3_req
+distinguished_name = req_distinguished_name
+[req_distinguished_name]
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = kubernetes
+DNS.2 = kubernetes.default
+DNS.3 = kubernetes.default.svc
+DNS.4 = kubernetes.default.svc.cluster.local
+IP.1 = 127.0.0.1
+IP.3 = 10.0.0.1
+EOF
+
+openssl genrsa -out kube-api.key 2048
+openssl req -new -key kube-api.key -subj "/CN=kube-apiserver" -out kube-api.csr -config api.conf
+openssl x509 -req -in kube-api.csr -CA ca.crt -CAkey ca.key -CAcreateserial  -out kube-api.crt -extensions v3_req -extfile api.conf -days 20000
+```
+
+
+### generate service account certs:
+```sh
+cd /root/certificates
+openssl genrsa -out service-account.key 2048
+openssl req -new -key service-account.key -subj "/CN=service-accounts" -out service-account.csr
+openssl x509 -req -in service-account.csr -CA ca.crt -CAkey ca.key -CAcreateserial  -out service-account.crt -days 20000
+```
+### start api-server via systemd
+```sh
+cat <<EOF | sudo tee /etc/systemd/system/kube-apiserver.service
+[Unit]
+Description=Kubernetes API Server
+Documentation=https://github.com/kubernetes/kubernetes
+
+[Service]
+ExecStart=/usr/local/bin/kube-apiserver \
+--advertise-address=192.168.64.21 \
+--tls-cert-file=/root/certificates/kube-api.crt \
+--tls-private-key-file=/root/certificates/kube-api.key \
+--etcd-cafile=/root/certificates/ca.crt \
+--etcd-certfile=/root/certificates/api-etcd.crt \
+--etcd-keyfile=/root/certificates/api-etcd.key \
+--etcd-servers=https://127.0.0.1:2379 \
+--service-account-key-file=/root/certificates/service-account.crt \
+--service-cluster-ip-range=10.0.0.0/24 \
+--service-account-signing-key-file=/root/certificates/service-account.key \
+--service-account-issuer=https://127.0.0.1:6443
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable kube-apiserver
+systemctl start kube-apiserver
+systemctl status kube-apiserver
+journalctl -u kube-apiserver
 ```
