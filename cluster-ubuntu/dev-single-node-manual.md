@@ -161,6 +161,38 @@ openssl genrsa -out service-account.key 2048
 openssl req -new -key service-account.key -subj "/CN=service-accounts" -out service-account.csr
 openssl x509 -req -in service-account.csr -CA ca.crt -CAkey ca.key -CAcreateserial  -out service-account.crt -days 20000
 ```
+### encryption for etcd:
+### create encryption key & encryption config to pass it to kube-api-server
+```sh
+ENCRYPTION_KEY=$(head -c 32 /dev/urandom | base64)
+echo $ENCRYPTION_KEY
+mkdir /var/lib/kubernetes
+cat > /var/lib/kubernetes/encryption-at-rest.yaml <<EOF
+kind: EncryptionConfig
+apiVersion: v1
+resources:
+  - resources:
+      - secrets
+    providers:
+      - aescbc:
+          keys:
+            - name: key1
+              secret: ${ENCRYPTION_KEY}
+      - identity: {}
+EOF
+```
+
+### auditing:
+### create an audit log policy to pass it to kube-api-server
+```sh
+cat > /var/lib/kubernetes/logging.yaml <<EOF
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+- level: Metadata
+EOF
+```
+
 ### start api-server via systemd
 ```sh
 cat <<EOF | sudo tee /etc/systemd/system/kube-apiserver.service
@@ -171,6 +203,8 @@ Documentation=https://github.com/kubernetes/kubernetes
 [Service]
 ExecStart=/usr/local/bin/kube-apiserver \
 --advertise-address=192.168.64.21 \
+--client-ca-file /root/certificates/ca.crt \
+--authorization-mode=RBAC \
 --tls-cert-file=/root/certificates/kube-api.crt \
 --tls-private-key-file=/root/certificates/kube-api.key \
 --etcd-cafile=/root/certificates/ca.crt \
@@ -180,7 +214,13 @@ ExecStart=/usr/local/bin/kube-apiserver \
 --service-account-key-file=/root/certificates/service-account.crt \
 --service-cluster-ip-range=10.0.0.0/24 \
 --service-account-signing-key-file=/root/certificates/service-account.key \
---service-account-issuer=https://127.0.0.1:6443
+--service-account-issuer=https://127.0.0.1:6443 \
+--encryption-provider-config=/var/lib/kubernetes/encryption-at-rest.yaml \
+--audit-policy-file=/var/lib/kubernetes/logging.yaml \
+--audit-log-path=/var/log/k8s-api-audit.log \
+--audit-log-maxage=30  \
+--audit-log-maxbackup=10 \
+--audit-log-maxsize=100 
 
 [Install]
 WantedBy=multi-user.target
@@ -191,4 +231,23 @@ systemctl enable kube-apiserver
 systemctl start kube-apiserver
 systemctl status kube-apiserver
 journalctl -u kube-apiserver
+```
+
+# User-client x509 cert authentication
+
+### create a user(raghu under "system:masters" group) & generate certs to user to authenticate with kube-api-server
+```sh
+cd /root/certificates
+openssl genrsa -out raghu.key 2048
+openssl req -new -key raghu.key -subj "/CN=raghu/O=system:masters" -out raghu.csr
+openssl x509 -req -in raghu.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out raghu.crt -days 20000
+```
+
+### check authentication
+```sh
+kubectl get secret \
+--server=https://127.0.0.1:6443 \
+--client-certificate /root/certificates/raghu.crt \
+--certificate-authority /root/certificates/ca.crt \
+--client-key /root/certificates/raghu.key
 ```
